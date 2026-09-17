@@ -1,45 +1,110 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"log"
-	"net/http"
+	"os"
 	"time"
 
-	"github.com/go-chi/chi/v5/middleware"
-
 	"github.com/go-chi/chi/v5"
+	"github.com/joho/godotenv"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+
+	"github.com/HarshK2903/social/internal/health"
 )
 
-type application struct {
-	config config
+type API struct {
+	server       *Server
+	mongoClient  *mongo.Client
+	router       *chi.Mux
+	healthHandle *health.Handler
 }
 
-type config struct {
-	addr string
-}
-
-func (app *application) mount() *chi.Mux {
-	r := chi.NewRouter()
-	r.Use(middleware.Logger)
-	r.Use(middleware.URLFormat)
-	r.Route("/api/v1", func(r chi.Router) {
-		r.Get("/", func(w http.ResponseWriter, rr *http.Request) {
-			w.Write([]byte("welcome"))
-		})
-		r.Get("/health", app.healthCheckHandler)
-	})
-	return r
-}
-
-func (app *application) run(mux *chi.Mux) error {
-	srv := &http.Server{
-		Addr:         app.config.addr,
-		Handler:      mux,
-		ReadTimeout:  time.Second * 30,
-		WriteTimeout: time.Second * 20,
-		IdleTimeout:  time.Minute,
+func NewAPI() (*API, error) {
+	err := godotenv.Load("../../.env")
+	if err != nil {
+		log.Println("warning: .env file not found")
 	}
-	log.Printf("Server Started Running %s", app.config.addr)
-	return srv.ListenAndServe()
+	// fmt.Print("Done!")
+	mongoURI := os.Getenv("MONGO_URI")
 
+	if mongoURI == "" {
+		return nil, fmt.Errorf("MONGO_URI is not set")
+	}
+
+	port := os.Getenv("PORT")
+
+	if port == "" {
+		port = "8080"
+	}
+
+	//Connect to MongoDB
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		10*time.Second,
+	)
+	defer cancel()
+
+	mongoClient, err := mongo.Connect(
+		ctx,
+		options.Client().ApplyURI(mongoURI),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to connect to MongoDB: %w",
+			err,
+		)
+	}
+	if err := mongoClient.Ping(ctx, nil); err != nil {
+		return nil, fmt.Errorf(
+			"failed to ping MongoDB: %w",
+			err,
+		)
+	}
+	log.Println("MongoDB connected")
+
+	dbName := os.Getenv("MONGO_DATABASE")
+
+	if dbName == "" {
+		dbName = "social"
+	}
+	db := mongoClient.Database(dbName)
+
+	// Create health service and handler
+	healthService := health.NewService(
+	// mongoClient,
+	)
+	healthHandler := health.NewHandler(
+		healthService,
+	)
+
+	//routers
+
+	router := NewRoutes(
+		healthHandler,
+	)
+
+	// reate HTTP server
+
+	server := NewServer(
+		port,
+		router,
+	)
+	app := &API{
+		server:       server,
+		mongoClient:  mongoClient,
+		router:       router,
+		healthHandle: healthHandler,
+	}
+
+	_ = db
+
+	return app, nil
+}
+
+func (a *API) Run() error {
+	return a.server.Run()
 }
